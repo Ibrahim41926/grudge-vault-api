@@ -1,36 +1,14 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { renderReminderEmail } from '../emails/reminder-email.js'
 import { config } from '../lib/config.js'
+import { prisma } from '../lib/prisma.js'
 import { rewriteReminderMessageWithOpenAI } from '../lib/reminder-rewrite.js'
 import { getResend } from '../lib/resend.js'
-import { createAdminClient } from '../lib/supabase.js'
-
-interface ReminderRow {
-  custom_interval_days: number | null
-  frequency: string
-  grudge: null | {
-    description: string | null
-    first_name: string
-    id: string
-    incident_date: string
-    last_name: string | null
-    title: string
-  }
-  id: string
-  message: string | null
-  title: string
-  user_id: string
-}
-
-interface ProfileRow {
-  email: string | null
-  full_name: string | null
-  id: string
-}
 
 function isAuthorized(request: FastifyRequest): boolean {
   if (!config.cronSecret) {
-    return true
+    // Pas de secret configure = route fermee, jamais ouverte par defaut.
+    return false
   }
 
   return request.headers.authorization === `Bearer ${config.cronSecret}`
@@ -73,12 +51,12 @@ function getNextTriggerDate(frequency: string, customDays?: number | null): Date
   }
 }
 
-function formatIncidentDate(value: string): string {
+function formatIncidentDate(value: Date): string {
   return new Intl.DateTimeFormat('fr-FR', {
     day: '2-digit',
     month: 'long',
     year: 'numeric',
-  }).format(new Date(value))
+  }).format(value)
 }
 
 export async function registerCronRoutes(app: FastifyInstance) {
@@ -87,60 +65,36 @@ export async function registerCronRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: 'Unauthorized' })
     }
 
-    const supabase = createAdminClient()
-    const now = new Date().toISOString()
+    const now = new Date()
 
-    const { data: reminders, error } = await supabase
-      .from('reminders')
-      .select(`
-        *,
-        grudge:grudges(id, title, description, first_name, last_name, incident_date)
-      `)
-      .eq('is_active', true)
-      .lte('next_trigger_at', now)
+    const reminders = await prisma.reminder.findMany({
+      where: { isActive: true, nextTriggerAt: { lte: now } },
+      include: {
+        grudge: {
+          select: { id: true, title: true, description: true, firstName: true, lastName: true, incidentDate: true },
+        },
+      },
+    })
 
-    if (error) {
-      app.log.error({ err: error }, 'Cron reminders query error')
-      return reply.code(500).send({ error: error.message })
-    }
-
-    if (!reminders || reminders.length === 0) {
+    if (reminders.length === 0) {
       return reply.send({ sent: 0, message: 'Aucun rappel a envoyer.' })
     }
 
-    const typedReminders = reminders as ReminderRow[]
-    const userIds = [...new Set(typedReminders.map((reminder) => reminder.user_id))]
-    const { data: profilesData } = await supabase
-      .from('profiles')
-      .select('id, full_name, email')
-      .in('id', userIds)
-
-    const profileMap = new Map((profilesData as ProfileRow[] | null ?? []).map((profile) => [profile.id, profile]))
-
-    for (const userId of userIds) {
-      const profile = profileMap.get(userId)
-
-      if (!profile?.email) {
-        const { data: { user: authUser } } = await supabase.auth.admin.getUserById(userId)
-
-        if (authUser?.email) {
-          profileMap.set(userId, {
-            email: authUser.email,
-            full_name: profile?.full_name ?? null,
-            id: userId,
-          })
-        }
-      }
-    }
+    const userIds = [...new Set(reminders.map((reminder) => reminder.userId))]
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, email: true, fullName: true },
+    })
+    const userMap = new Map(users.map((user) => [user.id, user]))
 
     let sent = 0
     let errors = 0
     const results: string[] = []
 
-    for (const reminder of typedReminders) {
-      const profile = profileMap.get(reminder.user_id)
-      const userEmail = profile?.email
-      const userName = profile?.full_name || 'Archiviste'
+    for (const reminder of reminders) {
+      const user = userMap.get(reminder.userId)
+      const userEmail = user?.email
+      const userName = user?.fullName || 'Archiviste'
       const grudge = reminder.grudge
 
       if (!userEmail || !grudge) {
@@ -148,8 +102,8 @@ export async function registerCronRoutes(app: FastifyInstance) {
         continue
       }
 
-      const traitorName = `${grudge.first_name} ${grudge.last_name || ''}`.trim()
-      const incidentDate = formatIncidentDate(grudge.incident_date)
+      const traitorName = `${grudge.firstName} ${grudge.lastName || ''}`.trim()
+      const incidentDate = formatIncidentDate(grudge.incidentDate)
       const grudgeDescription = grudge.description?.trim()
       const reminderMessageHint = reminder.message?.trim() || null
       const baseMessage = grudgeDescription || reminderMessageHint || `Rappelle-toi ce que ${traitorName} t a fait.`
@@ -157,7 +111,7 @@ export async function registerCronRoutes(app: FastifyInstance) {
 
       try {
         message = await rewriteReminderMessageWithOpenAI({
-          userId: reminder.user_id,
+          userId: reminder.userId,
           reminderTitle: reminder.title,
           grudgeTitle: grudge.title,
           grudgeDescription: grudgeDescription || baseMessage,
@@ -193,26 +147,28 @@ export async function registerCronRoutes(app: FastifyInstance) {
 
       sent += 1
 
-      await supabase.from('notifications').insert({
-        user_id: reminder.user_id,
-        grudge_id: grudge.id,
-        reminder_id: reminder.id,
-        title: reminder.title,
-        message,
-        type: 'reminder',
+      await prisma.notification.create({
+        data: {
+          userId: reminder.userId,
+          grudgeId: grudge.id,
+          reminderId: reminder.id,
+          title: reminder.title,
+          message,
+          type: 'reminder',
+        },
       })
 
       if (reminder.frequency === 'once') {
-        await supabase
-          .from('reminders')
-          .update({ is_active: false, last_triggered_at: now })
-          .eq('id', reminder.id)
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { isActive: false, lastTriggeredAt: now },
+        })
       } else {
-        const nextDate = getNextTriggerDate(reminder.frequency, reminder.custom_interval_days)
-        await supabase
-          .from('reminders')
-          .update({ next_trigger_at: nextDate.toISOString(), last_triggered_at: now })
-          .eq('id', reminder.id)
+        const nextDate = getNextTriggerDate(reminder.frequency, reminder.customIntervalDays)
+        await prisma.reminder.update({
+          where: { id: reminder.id },
+          data: { nextTriggerAt: nextDate, lastTriggeredAt: now },
+        })
       }
 
       results.push(`[OK] Reminder ${reminder.id} -> ${userEmail}`)
@@ -221,7 +177,7 @@ export async function registerCronRoutes(app: FastifyInstance) {
     return reply.send({
       sent,
       errors,
-      total: typedReminders.length,
+      total: reminders.length,
       results,
     })
   })

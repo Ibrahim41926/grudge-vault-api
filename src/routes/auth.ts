@@ -1,5 +1,5 @@
+import { Prisma } from '@prisma/client'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import type { User } from '@supabase/supabase-js'
 import {
   buildVerificationUrl,
   consumeVerificationToken,
@@ -12,10 +12,20 @@ import {
   normalizePassword,
   sendVerificationEmail,
   sendWelcomeEmail,
-  syncProfile,
 } from '../lib/auth-verification.js'
 import { config } from '../lib/config.js'
-import { createAdminClient } from '../lib/supabase.js'
+import { hashPassword, verifyPassword } from '../lib/password.js'
+import {
+  buildResetPasswordUrl,
+  consumePasswordResetToken,
+  createPasswordResetToken,
+  findPasswordResetToken,
+  sendPasswordResetEmail,
+} from '../lib/password-reset.js'
+import { prisma } from '../lib/prisma.js'
+import { signAccessToken } from '../lib/jwt.js'
+import { revokeAllForUser, revokeRefreshToken, rotateRefreshToken } from '../lib/refresh-tokens.js'
+import { issueSession, publicUser } from '../lib/session.js'
 
 interface SignupBody {
   email?: unknown
@@ -23,36 +33,22 @@ interface SignupBody {
   password?: unknown
 }
 
-function getPublicAuthErrorMessage(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return 'Inscription impossible.'
-  }
-
-  const normalized = error.message.toLowerCase()
-
-  if (normalized.includes('fetch failed')) {
-    return 'Le backend ne parvient pas a joindre Supabase. Verifiez que le serveur a bien acces a Internet.'
-  }
-
-  return error.message
+interface LoginBody {
+  email?: unknown
+  password?: unknown
 }
 
-function getSignupErrorStatus(message: string): number {
-  const normalized = message.toLowerCase()
+interface RefreshBody {
+  refresh_token?: unknown
+}
 
-  if (
-    normalized.includes('already') ||
-    normalized.includes('email_exists') ||
-    normalized.includes('already registered')
-  ) {
-    return 409
-  }
+interface ForgotPasswordBody {
+  email?: unknown
+}
 
-  if (normalized.includes('password') || normalized.includes('weak_password')) {
-    return 400
-  }
-
-  return 500
+interface ResetPasswordBody {
+  token?: unknown
+  password?: unknown
 }
 
 function buildVerifyRedirect(status: 'already' | 'error' | 'expired' | 'invalid' | 'success'): string {
@@ -75,90 +71,28 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Le mot de passe doit faire au moins 8 caracteres.' })
     }
 
-    let admin
-    let existingUser: User | null
+    const existingUser = await findUserByEmail(email)
 
-    try {
-      admin = createAdminClient()
-      existingUser = await findUserByEmail(admin, email)
-    } catch (error) {
-      app.log.error({ err: error }, 'Signup bootstrap error')
-      const message = getPublicAuthErrorMessage(error)
-      return reply.code(500).send({ error: message })
-    }
-
-    const existingFullName = typeof existingUser?.user_metadata?.full_name === 'string'
-      ? existingUser.user_metadata.full_name.trim()
-      : ''
-    const resolvedFullName = fullName || existingFullName
-
-    if (existingUser?.email_confirmed_at) {
+    if (existingUser?.emailConfirmedAt) {
       return reply.code(409).send({ error: 'Un compte existe deja avec cet email.' })
     }
 
-    let user = existingUser
-    let shouldDeleteUserOnFailure = false
+    const passwordHash = await hashPassword(password)
+    const resolvedFullName = fullName || existingUser?.fullName || ''
 
     try {
-      if (user) {
-        const attributes: {
-          email_confirm: boolean
-          password: string
-          user_metadata?: { full_name: string }
-        } = {
-          password,
-          email_confirm: false,
-        }
+      const user = existingUser
+        ? await prisma.user.update({
+            where: { id: existingUser.id },
+            data: { passwordHash, fullName: resolvedFullName || null },
+          })
+        : await prisma.user.create({
+            data: { email, passwordHash, fullName: resolvedFullName || null },
+          })
 
-        if (resolvedFullName) {
-          attributes.user_metadata = { full_name: resolvedFullName }
-        }
+      await deleteVerificationTokensForUser(user.id)
 
-        const { data, error } = await admin.auth.admin.updateUserById(user.id, attributes)
-
-        if (error || !data.user) {
-          throw new Error(error?.message ?? 'Mise a jour du compte impossible.')
-        }
-
-        user = data.user
-      } else {
-        const attributes: {
-          email: string
-          email_confirm: boolean
-          password: string
-          user_metadata?: { full_name: string }
-        } = {
-          email,
-          password,
-          email_confirm: false,
-        }
-
-        if (resolvedFullName) {
-          attributes.user_metadata = { full_name: resolvedFullName }
-        }
-
-        const { data, error } = await admin.auth.admin.createUser(attributes)
-
-        if (error || !data.user) {
-          throw new Error(error?.message ?? 'Creation du compte impossible.')
-        }
-
-        user = data.user
-        shouldDeleteUserOnFailure = true
-      }
-
-      await syncProfile(admin, {
-        email,
-        fullName: resolvedFullName,
-        userId: user.id,
-      })
-
-      await deleteVerificationTokensForUser(admin, user.id)
-
-      const { rawToken } = await createVerificationToken(admin, {
-        email,
-        userId: user.id,
-      })
+      const { rawToken } = await createVerificationToken({ email, userId: user.id })
 
       await sendVerificationEmail({
         email,
@@ -169,17 +103,12 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
       return reply.send({ success: true })
     } catch (error) {
-      if (user) {
-        await deleteVerificationTokensForUser(admin, user.id).catch(() => null)
-      }
-
-      if (shouldDeleteUserOnFailure && user) {
-        await admin.auth.admin.deleteUser(user.id).catch(() => null)
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return reply.code(409).send({ error: 'Un compte existe deja avec cet email.' })
       }
 
       app.log.error({ err: error }, 'Signup route error')
-      const message = getPublicAuthErrorMessage(error)
-      return reply.code(getSignupErrorStatus(message)).send({ error: message })
+      return reply.code(500).send({ error: 'Inscription impossible.' })
     }
   })
 
@@ -193,49 +122,40 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       return reply.redirect(buildVerifyRedirect('invalid'))
     }
 
-    const admin = createAdminClient()
-
     try {
-      const verification = await findVerificationToken(admin, rawToken)
+      const verification = await findVerificationToken(rawToken)
 
       if (!verification) {
         return reply.redirect(buildVerifyRedirect('invalid'))
       }
 
-      if (verification.consumed_at) {
+      if (verification.consumedAt) {
         return reply.redirect(buildVerifyRedirect('already'))
       }
 
-      if (new Date(verification.expires_at).getTime() <= Date.now()) {
+      if (verification.expiresAt.getTime() <= Date.now()) {
         return reply.redirect(buildVerifyRedirect('expired'))
       }
 
-      const { data, error } = await admin.auth.admin.getUserById(verification.user_id)
-      const user = data.user
+      const user = await prisma.user.findUnique({ where: { id: verification.userId } })
 
-      if (error || !user) {
+      if (!user) {
         return reply.redirect(buildVerifyRedirect('invalid'))
       }
 
-      const alreadyConfirmed = Boolean(user.email_confirmed_at)
+      const alreadyConfirmed = Boolean(user.emailConfirmedAt)
 
       if (!alreadyConfirmed) {
-        const { error: confirmError } = await admin.auth.admin.updateUserById(user.id, {
-          email_confirm: true,
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { emailConfirmedAt: new Date() },
         })
-
-        if (confirmError) {
-          return reply.redirect(buildVerifyRedirect('error'))
-        }
       }
 
-      await consumeVerificationToken(admin, verification.id)
+      await consumeVerificationToken(verification.id)
 
-      if (!alreadyConfirmed && user.email) {
-        sendWelcomeEmail({
-          email: user.email,
-          user,
-        }).catch((welcomeError) => {
+      if (!alreadyConfirmed) {
+        sendWelcomeEmail({ email: user.email, user }).catch((welcomeError) => {
           app.log.error({ err: welcomeError }, 'Welcome email error')
         })
       }
@@ -245,5 +165,120 @@ export async function registerAuthRoutes(app: FastifyInstance) {
       app.log.error({ err: error }, 'Verification error')
       return reply.redirect(buildVerifyRedirect('error'))
     }
+  })
+
+  app.post('/api/auth/login', async (request: FastifyRequest<{ Body: LoginBody }>, reply: FastifyReply) => {
+    const email = normalizeEmail(request.body?.email)
+    const password = normalizePassword(request.body?.password)
+
+    if (!email || !password) {
+      return reply.code(400).send({ error: 'Email et mot de passe requis.' })
+    }
+
+    const user = await findUserByEmail(email)
+
+    if (!user) {
+      return reply.code(401).send({ error: 'Email ou mot de passe incorrect.' })
+    }
+
+    if (!user.passwordHash) {
+      return reply.code(400).send({ error: 'Ce compte utilise Google ou Apple pour se connecter.' })
+    }
+
+    if (!(await verifyPassword(password, user.passwordHash))) {
+      return reply.code(401).send({ error: 'Email ou mot de passe incorrect.' })
+    }
+
+    if (!user.emailConfirmedAt) {
+      return reply.code(403).send({ error: 'Veuillez confirmer votre email avant de vous connecter.' })
+    }
+
+    const session = await issueSession(user.id)
+    return reply.send({ ...session, user: publicUser(user) })
+  })
+
+  app.post('/api/auth/refresh', async (request: FastifyRequest<{ Body: RefreshBody }>, reply: FastifyReply) => {
+    const refreshToken = typeof request.body?.refresh_token === 'string' ? request.body.refresh_token : ''
+
+    if (!refreshToken) {
+      return reply.code(400).send({ error: 'Refresh token requis.' })
+    }
+
+    const result = await rotateRefreshToken(refreshToken)
+
+    if (!result.ok) {
+      return reply.code(401).send({ error: 'Session expiree, veuillez vous reconnecter.' })
+    }
+
+    return reply.send({
+      access_token: signAccessToken(result.userId),
+      refresh_token: result.token,
+    })
+  })
+
+  app.post('/api/auth/logout', async (request: FastifyRequest<{ Body: RefreshBody }>, reply: FastifyReply) => {
+    const refreshToken = typeof request.body?.refresh_token === 'string' ? request.body.refresh_token : ''
+
+    if (refreshToken) {
+      await revokeRefreshToken(refreshToken)
+    }
+
+    return reply.send({ success: true })
+  })
+
+  app.post('/api/auth/forgot-password', async (request: FastifyRequest<{ Body: ForgotPasswordBody }>, reply: FastifyReply) => {
+    const email = normalizeEmail(request.body?.email)
+
+    if (email) {
+      const user = await findUserByEmail(email)
+
+      if (user) {
+        const { rawToken } = await createPasswordResetToken(user.id)
+
+        try {
+          await sendPasswordResetEmail({ user, resetUrl: buildResetPasswordUrl(rawToken) })
+        } catch (error) {
+          app.log.error({ err: error }, 'Forgot password email error')
+        }
+      }
+    }
+
+    // Reponse identique que l'email existe ou non, pour ne pas reveler l'existence d'un compte.
+    return reply.send({ success: true })
+  })
+
+  app.post('/api/auth/reset-password', async (request: FastifyRequest<{ Body: ResetPasswordBody }>, reply: FastifyReply) => {
+    const rawToken = typeof request.body?.token === 'string' ? request.body.token.trim() : ''
+    const newPassword = normalizePassword(request.body?.password)
+
+    if (!rawToken) {
+      return reply.code(400).send({ error: 'Token invalide.' })
+    }
+
+    if (newPassword.length < 8) {
+      return reply.code(400).send({ error: 'Le mot de passe doit faire au moins 8 caracteres.' })
+    }
+
+    const verification = await findPasswordResetToken(rawToken)
+
+    if (!verification || verification.consumedAt) {
+      return reply.code(400).send({ error: 'Ce lien de reinitialisation est invalide ou deja utilise.' })
+    }
+
+    if (verification.expiresAt.getTime() <= Date.now()) {
+      return reply.code(400).send({ error: 'Ce lien de reinitialisation a expire.' })
+    }
+
+    const passwordHash = await hashPassword(newPassword)
+
+    await prisma.user.update({
+      where: { id: verification.userId },
+      data: { passwordHash },
+    })
+
+    await consumePasswordResetToken(verification.id)
+    await revokeAllForUser(verification.userId)
+
+    return reply.send({ success: true })
   })
 }

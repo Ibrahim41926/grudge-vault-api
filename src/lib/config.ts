@@ -1,3 +1,4 @@
+import path from 'path'
 import dotenv from 'dotenv'
 
 dotenv.config()
@@ -16,15 +17,20 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '')
 }
 
-function parseOrigins(value: string | undefined): string[] {
+function parseCommaList(value: string | undefined): string[] {
   if (!value) {
-    return ['http://localhost:3000', 'http://localhost:8081', 'http://localhost:19006']
+    return []
   }
 
   return value
     .split(',')
-    .map((origin) => origin.trim())
+    .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function parseOrigins(value: string | undefined): string[] {
+  const parsed = parseCommaList(value)
+  return parsed.length > 0 ? parsed : ['http://localhost:3000', 'http://localhost:8081', 'http://localhost:19006']
 }
 
 export const config = {
@@ -37,8 +43,15 @@ export const config = {
   corsOrigins: parseOrigins(process.env.CORS_ORIGINS),
   resendApiKey: requireEnv('RESEND_API_KEY'),
   resendFromEmail: process.env.RESEND_FROM_EMAIL?.trim() || 'GrudgeVault <onboarding@resend.dev>',
-  storageBucket: 'grudge-media',
   supabaseAnonKey: requireEnv('SUPABASE_ANON_KEY'),
   supabaseServiceRoleKey: requireEnv('SUPABASE_SERVICE_ROLE_KEY'),
   supabaseUrl: requireEnv('SUPABASE_URL'),
+  jwtAccessSecret: requireEnv('JWT_ACCESS_SECRET'),
+  jwtRefreshSecret: requireEnv('JWT_REFRESH_SECRET'),
+  fileTokenSecret: requireEnv('FILE_TOKEN_SECRET'),
+  storageRoot: path.resolve(process.env.STORAGE_ROOT?.trim() || path.join(process.cwd(), 'storage')),
+  maxUploadSizeBytes: Number.parseInt(process.env.MAX_UPLOAD_SIZE_BYTES ?? '', 10) || 25 * 1024 * 1024,
+  // Optionnelles : l'app doit demarrer meme sans OAuth configure (fonctionnalite desactivee).
+  googleOAuthClientIds: parseCommaList(process.env.GOOGLE_OAUTH_CLIENT_IDS),
+  appleOAuthClientIds: parseCommaList(process.env.APPLE_OAUTH_CLIENT_IDS),
 } as const

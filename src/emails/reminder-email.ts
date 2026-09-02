@@ -47,7 +47,7 @@ export function renderReminderEmail(params: {
     <div class="card">
       <span class="logo-icon">🗡️</span>
       <h1>Les archives ont un message pour vous, ${escapeHtml(params.userName)}.</h1>
-      <p class="subtitle">Vous aviez demande a ne pas oublier ceci.</p>
+      <p class="subtitle">Vous aviez demander à ne pas oublier ceci.</p>
 
       <hr class="divider" />
 
@@ -78,8 +78,8 @@ export function renderReminderEmail(params: {
     </div>
 
     <div class="footer">
-      <p>GrudgeVault - Archives Emotionnelles Privees</p>
-      <p>Vos donnees vous appartiennent. Toujours.</p>
+      <p>GrudgeVault - Archives Emotionnelles Privées</p>
+      <p>Vos données vous appartiennent. Toujours.</p>
       <p style="margin-top:8px">
         <a href="${params.dashboardUrl}/settings">Ajuster vos rappels</a>
       </p>
