@@ -80,6 +80,7 @@ model User {
   refreshTokens           RefreshToken[]
   oauthIdentities         OAuthIdentity[]
   tags                    Tag[]
+  people                  Person[]
   grudges                 Grudge[]
   uploads                 Upload[]
   reminders               Reminder[]
@@ -154,6 +155,29 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
+// Profil de personne : plusieurs rancunes peuvent pointer vers la meme Person,
+// choisie manuellement (pas de matching automatique par nom).
+model Person {
+  id     String @id @default(uuid()) @db.Char(36)
+  userId String @map("user_id") @db.Char(36)
+
+  firstName    String  @map("first_name") @db.VarChar(191)
+  lastName     String? @map("last_name") @db.VarChar(191)
+  nickname     String? @db.VarChar(191)
+  phone        String? @db.VarChar(64)
+  email        String? @db.VarChar(191)
+  socialHandle String? @map("social_handle") @db.VarChar(191)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grudges Grudge[]
+
+  @@index([userId])
+  @@map("people")
+}
+
 model Tag {
   id        String   @id @default(uuid()) @db.Char(36)
   userId    String   @map("user_id") @db.Char(36)
@@ -169,8 +193,9 @@ model Tag {
 }
 
 model Grudge {
-  id     String @id @default(uuid()) @db.Char(36)
-  userId String @map("user_id") @db.Char(36)
+  id       String  @id @default(uuid()) @db.Char(36)
+  userId   String  @map("user_id") @db.Char(36)
+  personId String? @map("person_id") @db.Char(36)
 
   firstName    String  @map("first_name") @db.VarChar(191)
   lastName     String? @map("last_name") @db.VarChar(191)
@@ -192,12 +217,14 @@ model Grudge {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  person        Person?        @relation(fields: [personId], references: [id], onDelete: SetNull)
   grudgeTags    GrudgeTag[]
   uploads       Upload[]
   reminders     Reminder[]
   notifications Notification[]
 
   @@index([userId])
+  @@index([personId])
   @@index([severity])
   @@index([incidentDate])
   @@index([category])

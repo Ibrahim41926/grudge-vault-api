@@ -33,11 +33,23 @@ interface GrudgeBody {
   incident_date?: unknown
   last_name?: unknown
   nickname?: unknown
+  person_id?: unknown
   phone?: unknown
   severity?: unknown
   social_handle?: unknown
   tag_ids?: unknown
   title?: unknown
+}
+
+async function resolvePersonId(rawPersonId: unknown, userId: string): Promise<{ error?: string; personId: string | null }> {
+  const personId = toTrimmedString(rawPersonId)
+
+  if (!personId) {
+    return { personId: null }
+  }
+
+  const owned = await prisma.person.count({ where: { id: personId, userId } })
+  return owned > 0 ? { personId } : { personId: null, error: 'person_id invalide.' }
 }
 
 async function searchGrudgeIds(userId: string, search: string): Promise<string[]> {
@@ -112,6 +124,10 @@ export async function registerGrudgeRoutes(app: FastifyInstance) {
       where.grudgeTags = { some: { tagId: query.tag_id } }
     }
 
+    if (typeof query.person_id === 'string' && query.person_id) {
+      where.personId = query.person_id
+    }
+
     if (typeof query.search === 'string' && query.search.trim()) {
       where.id = { in: await searchGrudgeIds(userId, query.search) }
     }
@@ -173,10 +189,17 @@ export async function registerGrudgeRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'tag_ids invalides.' })
     }
 
+    const { personId, error: personError } = await resolvePersonId(body.person_id, userId)
+
+    if (personError) {
+      return reply.code(400).send({ error: personError })
+    }
+
     const created = await prisma.$transaction(async (tx) => {
       const grudge = await tx.grudge.create({
         data: {
           userId,
+          personId,
           firstName,
           lastName: toNullableString(body.last_name),
           nickname: toNullableString(body.nickname),
@@ -238,6 +261,16 @@ export async function registerGrudgeRoutes(app: FastifyInstance) {
 
     if (tagIds !== null && !(await assertTagsOwnedByUser(tagIds, userId))) {
       return reply.code(400).send({ error: 'tag_ids invalides.' })
+    }
+
+    if (body.person_id !== undefined) {
+      const { personId, error: personError } = await resolvePersonId(body.person_id, userId)
+
+      if (personError) {
+        return reply.code(400).send({ error: personError })
+      }
+
+      data.person = personId ? { connect: { id: personId } } : { disconnect: true }
     }
 
     await prisma.$transaction(async (tx) => {

@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import cookie from '@fastify/cookie'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart'
 import { config } from './lib/config.js'
@@ -9,6 +10,7 @@ import { registerFileRoutes } from './routes/files.js'
 import { registerGrudgeRoutes } from './routes/grudges.js'
 import { registerNotificationRoutes } from './routes/notifications.js'
 import { registerOAuthRoutes } from './routes/oauth.js'
+import { registerPeopleRoutes } from './routes/people.js'
 import { registerReminderRoutes } from './routes/reminders.js'
 import { registerTagRoutes } from './routes/tags.js'
 import { registerUploadRoutes } from './routes/uploads.js'
@@ -33,7 +35,10 @@ await app.register(cors, {
   },
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Authorization', 'Content-Type'],
+  credentials: true,
 })
+
+await app.register(cookie)
 
 await app.register(multipart, {
   limits: { fileSize: config.maxUploadSizeBytes },
@@ -48,6 +53,7 @@ await registerCronRoutes(app)
 await registerFileRoutes(app)
 await registerUploadRoutes(app)
 await registerGrudgeRoutes(app)
+await registerPeopleRoutes(app)
 await registerTagRoutes(app)
 await registerReminderRoutes(app)
 await registerNotificationRoutes(app)

@@ -14,6 +14,7 @@ import {
   sendWelcomeEmail,
 } from '../lib/auth-verification.js'
 import { config } from '../lib/config.js'
+import { clearRefreshCookie, REFRESH_COOKIE_NAME, setRefreshCookie } from '../lib/cookies.js'
 import { hashPassword, verifyPassword } from '../lib/password.js'
 import {
   buildResetPasswordUrl,
@@ -194,11 +195,15 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     }
 
     const session = await issueSession(user.id)
+    setRefreshCookie(reply, session.refresh_token)
     return reply.send({ ...session, user: publicUser(user) })
   })
 
   app.post('/api/auth/refresh', async (request: FastifyRequest<{ Body: RefreshBody }>, reply: FastifyReply) => {
-    const refreshToken = typeof request.body?.refresh_token === 'string' ? request.body.refresh_token : ''
+    const refreshToken =
+      (typeof request.body?.refresh_token === 'string' ? request.body.refresh_token : '') ||
+      request.cookies[REFRESH_COOKIE_NAME] ||
+      ''
 
     if (!refreshToken) {
       return reply.code(400).send({ error: 'Refresh token requis.' })
@@ -207,9 +212,11 @@ export async function registerAuthRoutes(app: FastifyInstance) {
     const result = await rotateRefreshToken(refreshToken)
 
     if (!result.ok) {
+      clearRefreshCookie(reply)
       return reply.code(401).send({ error: 'Session expiree, veuillez vous reconnecter.' })
     }
 
+    setRefreshCookie(reply, result.token)
     return reply.send({
       access_token: signAccessToken(result.userId),
       refresh_token: result.token,
@@ -217,12 +224,16 @@ export async function registerAuthRoutes(app: FastifyInstance) {
   })
 
   app.post('/api/auth/logout', async (request: FastifyRequest<{ Body: RefreshBody }>, reply: FastifyReply) => {
-    const refreshToken = typeof request.body?.refresh_token === 'string' ? request.body.refresh_token : ''
+    const refreshToken =
+      (typeof request.body?.refresh_token === 'string' ? request.body.refresh_token : '') ||
+      request.cookies[REFRESH_COOKIE_NAME] ||
+      ''
 
     if (refreshToken) {
       await revokeRefreshToken(refreshToken)
     }
 
+    clearRefreshCookie(reply)
     return reply.send({ success: true })
   })
 
@@ -278,6 +289,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
     await consumePasswordResetToken(verification.id)
     await revokeAllForUser(verification.userId)
+    clearRefreshCookie(reply)
 
     return reply.send({ success: true })
   })

@@ -1,5 +1,20 @@
-import type { Grudge, Notification, Reminder, Tag, Upload } from '@prisma/client'
+import type { Grudge, Notification, Person, Reminder, Tag, Upload } from '@prisma/client'
 import { buildSignedFileUrl } from './signed-url.js'
+
+export function serializePerson(person: Person) {
+  return {
+    id: person.id,
+    user_id: person.userId,
+    first_name: person.firstName,
+    last_name: person.lastName,
+    nickname: person.nickname,
+    phone: person.phone,
+    email: person.email,
+    social_handle: person.socialHandle,
+    created_at: person.createdAt,
+    updated_at: person.updatedAt,
+  }
+}
 
 export function serializeTag(tag: Tag) {
   return {
@@ -76,6 +91,7 @@ export function serializeGrudge(grudge: Grudge, extras: SerializeGrudgeExtras = 
   return {
     id: grudge.id,
     user_id: grudge.userId,
+    person_id: grudge.personId,
     first_name: grudge.firstName,
     last_name: grudge.lastName,
     nickname: grudge.nickname,
